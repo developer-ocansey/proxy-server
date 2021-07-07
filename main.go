@@ -2,48 +2,51 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"io"
 	"log"
-	"net"
+	"net/http"
+	"net/url"
 )
 
-var localAddr *string = flag.String("local", "localhost:2021", "local address")
-var remoteAddr *string = flag.String("remote", "", "remote address")
-
-func main() {
-	flag.Parse()
-	fmt.Printf("Listening: %v\nProxying: %v\n\n", *localAddr, *remoteAddr)
-
-	listener, err := net.Listen("tcp", *localAddr)
-	if err != nil {
-		panic(err)
-	}
-	for {
-		conn, err := listener.Accept()
-		log.Println("New connection", conn.RemoteAddr())
-		if err != nil {
-			log.Println("error accepting connection", err)
-			continue
-		}
-		go func() {
-			defer conn.Close()
-			dailConn, err := net.Dial("tcp", *remoteAddr)
-			if err != nil {
-				log.Println("error dialing remote addr", err)
-				return
-			}
-			defer dailConn.Close()
-			closer := make(chan struct{}, 2)
-			go copy(closer, dailConn, conn)
-			go copy(closer, conn, dailConn)
-			<-closer
-			log.Println("Connection complete", conn.RemoteAddr())
-		}()
-	}
+type proxy struct {
+	rmt *url.URL
 }
 
-func copy(closer chan struct{}, dst io.Writer, src io.Reader) {
-	_, _ = io.Copy(dst, src)
-	closer <- struct{}{} // connection is closed, send signal to stop proxy
+func (p *proxy) ServeHTTP(wr http.ResponseWriter, req *http.Request) {
+	client := &http.Client{}
+
+	req, err := http.NewRequest(req.Method, p.rmt.String(), req.Body)
+	if err != nil {
+		log.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(wr, "Server Error", http.StatusInternalServerError)
+		log.Fatal("ServeHTTP:", err)
+	}
+	defer resp.Body.Close()
+
+	log.Println(p.rmt, " ", resp.Status)
+
+	wr.WriteHeader(resp.StatusCode)
+	io.Copy(wr, resp.Body)
+}
+
+func main() {
+	var addr = flag.String("addr", ":9090", "The addr of the application.")
+	var rmt = flag.String("rmt", "localhost:8080/test", "Remote address.")
+	flag.Parse()
+
+	url, err := url.Parse(*rmt)
+	if err != nil {
+		log.Fatal(err)
+	}
+	handler := &proxy{
+		rmt: url,
+	}
+
+	log.Println("Starting proxy server on", *addr)
+	if err := http.ListenAndServe(*addr, handler); err != nil {
+		log.Fatal("ListenAndServe:", err)
+	}
 }
